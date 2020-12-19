@@ -8,8 +8,8 @@ require (
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d // indirect
 	github.com/omecodes/bome v0.0.0-20201212145154-cc0621995609 // indirect
 	github.com/omecodes/common v0.0.0-20201205124409-0a391e4b4c08
-	github.com/omecodes/libome v0.0.0-20201202084519-7cffbc7a04c8
-	github.com/omecodes/service v0.0.0-20201205141015-c8df418c52be
+	github.com/omecodes/libome v0.0.0-20201219125050-603bd134339c
+	github.com/omecodes/service v0.0.0-20201219125424-52168ada9a94
 	github.com/omecodes/zebou v0.0.0-20201218212929-8dbed76eaa74 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/spf13/cobra v1.1.1
