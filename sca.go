@@ -1,143 +1,212 @@
-package main
+package sca
 
 import (
 	"context"
-	"encoding/json"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
-	"github.com/omecodes/common/env/app"
+	"github.com/gorilla/mux"
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
+	grpc_opentracing "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
 	"github.com/omecodes/common/utils/log"
-	"github.com/omecodes/common/utils/prompt"
-	"github.com/omecodes/libome"
+	ome "github.com/omecodes/libome"
 	"github.com/omecodes/libome/crypt"
-	"github.com/omecodes/libome/ports"
-	"github.com/omecodes/service"
-	"github.com/spf13/cobra"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
 	"io/ioutil"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
-var (
-	Vendor       = "Ome"
-	Version      = "1.0.0"
-	services     = []string{"discovery", "accounts", "tokens", "apps"}
-	domain       string
-	ip, eip      string
-	gPort        int
-	certFilename string
-	keyFilename  string
-	cmd          *cobra.Command
-	application  *app.App
-	passwords    map[string]string
-)
-
-func init() {
-	application = app.New(Vendor, "Services-CA",
-		app.WithVersion(Version),
-		app.WithRunCommandFunc(start),
-	)
-	err := application.InitDirs()
+func fileExists(filename string) bool {
+	_, err := os.Stat(filename)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
+		return os.IsExist(err)
+	}
+	return true
+}
+
+type ServerConfig struct {
+	Manager      CredentialsManager
+	Domain       string
+	PublicIP     string
+	GRPCPort     int
+	HTTPPort     int
+	BindIP       string
+	CertFilename string
+	KeyFilename  string
+	WorkingDir   string
+}
+
+func NewServer(cfg *ServerConfig) *Server {
+	return &Server{
+		config: cfg,
+	}
+}
+
+type Server struct {
+	config *ServerConfig
+
+	adminPassword string
+	privateKey    crypto.PrivateKey
+	certificate   *x509.Certificate
+	listener      net.Listener
+	Errs          chan error
+}
+
+func (s *Server) loadOrGenerateSigningKeyPair() (err error) {
+	if s.certificate != nil && s.privateKey != nil {
+		return nil
 	}
 
-	passwords = map[string]string{}
-	passwordsFilename := filepath.Join(application.DataDir(), "passwords.json")
-	stats, err := os.Stat(passwordsFilename)
-	if err != nil && !os.IsNotExist(err) {
-		fmt.Println(err)
-		os.Exit(-1)
-	}
+	certificateFilename := filepath.Join(s.config.WorkingDir, "ca.crt")
+	keyFilename := filepath.Join(s.config.WorkingDir, "ca.key")
 
-	if stats != nil {
-		data, err := ioutil.ReadFile(passwordsFilename)
+	shouldGenerateNewPair := !fileExists(certificateFilename) || !fileExists(keyFilename)
+	if !shouldGenerateNewPair {
+		s.privateKey, err = crypt.LoadPrivateKey([]byte{}, keyFilename)
 		if err != nil {
-			fmt.Println(err)
-			os.Exit(-1)
+			return fmt.Errorf("could not load private key: %s", err)
 		}
 
-		err = json.Unmarshal(data, &passwords)
+		s.certificate, err = crypt.LoadCertificate(certificateFilename)
 		if err != nil {
-			fmt.Println(err)
-			os.Exit(-1)
+			return fmt.Errorf("could not load certificate: %s", err)
+		}
+		return
+	}
+
+	if shouldGenerateNewPair {
+		s.privateKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return fmt.Errorf("could not generate key pair: %s", err)
+		}
+		pub := s.privateKey.(*ecdsa.PrivateKey).PublicKey
+
+		caCertTemplate := &crypt.CertificateTemplate{
+			Organization:     "oe",
+			Name:             "CA",
+			Domains:          []string{s.config.Domain},
+			IPs:              []net.IP{},
+			Expiry:           time.Hour * 24 * 370,
+			PublicKey:        &pub,
+			SignerPrivateKey: s.privateKey,
+		}
+		caCertTemplate.IPs = append(caCertTemplate.IPs, net.ParseIP(s.config.PublicIP))
+
+		s.certificate, err = crypt.GenerateCACertificate(caCertTemplate)
+		if err != nil {
+			return fmt.Errorf("could not generate CA cert: %s", err)
+		}
+
+		_ = crypt.StoreCertificate(s.certificate, certificateFilename, os.ModePerm)
+		_ = crypt.StorePrivateKey(s.privateKey, nil, keyFilename)
+	}
+	return
+}
+
+func (s *Server) Start() error {
+	s.Errs = make(chan error, 1)
+
+	adminPasswordFile := filepath.Join(s.config.WorkingDir, "admin-psswd")
+	data, err := ioutil.ReadFile(adminPasswordFile)
+	if err != nil {
+		s.adminPassword = string(data)
+	} else {
+		s.adminPassword = crypt.NewPassword(16)
+		_ = ioutil.WriteFile(adminPasswordFile, []byte(s.adminPassword), os.ModePerm)
+	}
+
+	err = s.loadOrGenerateSigningKeyPair()
+	if err != nil {
+		return err
+	}
+
+	var tc *tls.Config
+	certPEMBytes, _ := crypt.PEMEncodeCertificate(s.certificate)
+	keyPEMBytes, _ := crypt.PEMEncodeKey(s.privateKey)
+	tlsCert, err := tls.X509KeyPair(certPEMBytes, keyPEMBytes)
+	if err == nil {
+		clientCAs := x509.NewCertPool()
+		clientCAs.AddCert(s.certificate)
+		tc = &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			ClientCAs:    clientCAs,
+			ClientAuth:   tls.VerifyClientCertIfGiven,
 		}
 	} else {
-		for _, name := range services {
-			passwords[name] = crypt.NewPassword(16)
-		}
-
-		data, err := json.Marshal(passwords)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(-1)
-		}
-
-		err = ioutil.WriteFile(passwordsFilename, data, os.ModePerm)
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(-1)
-		}
+		log.Error("could not load TLS configs", log.Err(err))
+		return err
 	}
 
-	cmd = application.GetCommand()
-
-	flags := application.StartCommand().PersistentFlags()
-
-	flags.StringVar(&domain, "dn", "", "Domain name (required)")
-	flags.StringVar(&ip, "ip", "", "IP address to bind server to (required)")
-	flags.StringVar(&eip, "eip", "", "External IP address")
-	flags.IntVar(&gPort, "grpc", ports.Ome, "gRPC server port")
-	flags.StringVar(&certFilename, "cert", "", "Certificate file path")
-	flags.StringVar(&keyFilename, "key", "", "Key file path")
-
-	_ = cobra.MarkFlagRequired(flags, "domain")
-	_ = cobra.MarkFlagRequired(flags, "ip")
-	_ = cobra.MarkFlagRequired(flags, "dsn")
-}
-
-func start() {
-	if ip == "" || domain == "" {
-		sc := application.StartCommand()
-		_ = sc.Help()
-		os.Exit(-1)
-	}
-
-	var boxParams service.Params
-
-	boxParams.Dir = application.DataDir()
-	boxParams.Name = "sca"
-	boxParams.CA = true
-	boxParams.Domain = domain
-	boxParams.NoRegistry = true
-	boxParams.Ip = ip
-	if eip != "" && eip != ip {
-		boxParams.ExternalIp = eip
-	}
-	boxParams.CertificatePath = certFilename
-	boxParams.KeyPath = keyFilename
-
-	box, err := service.CreateBox(context.Background(), &boxParams)
+	gRPCAddress := fmt.Sprintf("%s:%d", s.config.BindIP, s.config.GRPCPort)
+	s.listener, err = tls.Listen("tcp", gRPCAddress, tc)
 	if err != nil {
-		log.Fatal("Services CA • could not create box", log.Err(err))
+		return err
 	}
 
-	err = box.StartCAService(func(credentials *ome.ProxyCredentials) (bool, error) {
-		pass, found := passwords[credentials.Key]
-		return found && pass == credentials.Secret, nil
+	log.Info("starting gRPC server", log.Field("service", "CA"), log.Field("at", gRPCAddress))
+	var opts []grpc.ServerOption
+
+	defaultInterceptor := ome.NewGrpcContextInterceptor(
+		ome.NewProxyBasicInterceptor(),
+		ome.GrpcContextUpdaterFunc(func(ctx context.Context) (context.Context, error) {
+			ctx = ContextWithCert(ctx, s.certificate)
+			ctx = ContextWithKey(ctx, s.privateKey)
+			return ContextWithManager(ctx, s.config.Manager), nil
+		}),
+	)
+
+	logger, _ := zap.NewProduction()
+	chainUnaryInterceptor := grpc_middleware.ChainUnaryServer(
+		defaultInterceptor.UnaryUpdate,
+		grpc_opentracing.UnaryServerInterceptor(),
+		grpc_zap.UnaryServerInterceptor(logger),
+	)
+
+	opts = append(opts, grpc.UnaryInterceptor(chainUnaryInterceptor))
+	srv := grpc.NewServer(opts...)
+	ome.RegisterCSRServer(srv, &csrServerHandler{})
+
+	go func() {
+		if err := srv.Serve(s.listener); err != nil {
+			log.Error("failed to serve CA", log.Err(err))
+		}
+	}()
+
+	router := mux.NewRouter()
+	router.Path("/ca.crt").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		certificateFilename := filepath.Join(s.config.WorkingDir, "ca.crt")
+
+		data, err := ioutil.ReadFile(certificateFilename)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-type", "text/plain")
+		_, _ = w.Write(data)
 	})
-	if err != nil {
-		log.Error("Services CA • could not start CA service", log.Err(err))
-		os.Exit(-1)
-	}
 
-	defer box.Stop()
-	<-prompt.QuitSignal()
+	address := fmt.Sprintf("%s:%d", s.config.BindIP, s.config.HTTPPort)
+
+	go func() {
+		if s.config.CertFilename != "" {
+			s.Errs <- http.ListenAndServeTLS(address, s.config.CertFilename, s.config.KeyFilename, router)
+		} else {
+			s.Errs <- http.ListenAndServe(address, router)
+		}
+	}()
+	return nil
 }
 
-func main() {
-	if err := cmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
-	}
+func (s *Server) Stop() error {
+	return s.listener.Close()
 }
