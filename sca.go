@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"github.com/gorilla/mux"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
 	grpc_opentracing "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
@@ -20,7 +19,6 @@ import (
 	"google.golang.org/grpc"
 	"io/ioutil"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -35,15 +33,11 @@ func fileExists(filename string) bool {
 }
 
 type ServerConfig struct {
-	Manager      CredentialsManager
-	Domain       string
-	PublicIP     string
-	GRPCPort     int
-	HTTPPort     int
-	BindIP       string
-	CertFilename string
-	KeyFilename  string
-	WorkingDir   string
+	Manager    CredentialsManager
+	Port       int
+	Domain     string
+	BindIP     string
+	WorkingDir string
 }
 
 func NewServer(cfg *ServerConfig) *Server {
@@ -100,7 +94,7 @@ func (s *Server) loadOrGenerateSigningKeyPair() (err error) {
 			PublicKey:        &pub,
 			SignerPrivateKey: s.privateKey,
 		}
-		caCertTemplate.IPs = append(caCertTemplate.IPs, net.ParseIP(s.config.PublicIP))
+		caCertTemplate.IPs = append(caCertTemplate.IPs, net.ParseIP(s.config.BindIP))
 
 		s.certificate, err = crypt.GenerateCACertificate(caCertTemplate)
 		if err != nil {
@@ -147,7 +141,7 @@ func (s *Server) Start() error {
 		return err
 	}
 
-	gRPCAddress := fmt.Sprintf("%s:%d", s.config.BindIP, s.config.GRPCPort)
+	gRPCAddress := fmt.Sprintf("%s:%d", s.config.BindIP, s.config.Port)
 	s.listener, err = tls.Listen("tcp", gRPCAddress, tc)
 	if err != nil {
 		return err
@@ -181,30 +175,11 @@ func (s *Server) Start() error {
 			log.Error("failed to serve CA", log.Err(err))
 		}
 	}()
-
-	router := mux.NewRouter()
-	router.Path("/ca.crt").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		certificateFilename := filepath.Join(s.config.WorkingDir, "ca.crt")
-
-		data, err := ioutil.ReadFile(certificateFilename)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-type", "text/plain")
-		_, _ = w.Write(data)
-	})
-
-	address := fmt.Sprintf("%s:%d", s.config.BindIP, s.config.HTTPPort)
-
-	go func() {
-		if s.config.CertFilename != "" {
-			s.Errs <- http.ListenAndServeTLS(address, s.config.CertFilename, s.config.KeyFilename, router)
-		} else {
-			s.Errs <- http.ListenAndServe(address, router)
-		}
-	}()
 	return nil
+}
+
+func (s *Server) Certificate() *x509.Certificate {
+	return s.certificate
 }
 
 func (s *Server) Stop() error {

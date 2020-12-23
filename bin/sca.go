@@ -11,15 +11,12 @@ import (
 )
 
 var (
-	domain       string
-	ip, eip      string
-	gPort        int
-	hPort        int
-	certFilename string
-	keyFilename  string
-	secret       string
-	workingDir   string
-	cmd          *cobra.Command
+	domain     string
+	ip         string
+	port       int
+	secret     string
+	workingDir string
+	cmd        *cobra.Command
 )
 
 func init() {
@@ -40,12 +37,8 @@ func init() {
 
 	flags.StringVar(&domain, "dn", "", "Domain name (required)")
 	flags.StringVar(&ip, "ip", "", "IP address to bind server to (required)")
-	flags.StringVar(&eip, "eip", "", "External IP address")
-	flags.IntVar(&hPort, "http", 8080, "gRPC server port")
-	flags.IntVar(&gPort, "grpc", ports.CA, "gRPC server port")
+	flags.IntVar(&port, "grpc", ports.CA, "gRPC server port")
 	flags.StringVar(&secret, "secret", "", "Signing API secret")
-	flags.StringVar(&certFilename, "cert", "", "Certificate file path")
-	flags.StringVar(&keyFilename, "key", "", "Key file path")
 
 	_ = cobra.MarkFlagRequired(flags, "dn")
 	_ = cobra.MarkFlagRequired(flags, "ip")
@@ -53,22 +46,14 @@ func init() {
 }
 
 func start(cmd *cobra.Command, args []string) {
-	if eip == "" {
-		eip = ip
-	}
-
 	cfg := &sca.ServerConfig{
 		Manager: sca.CredentialsManagerFunc(func(s string) (string, error) {
 			return secret, nil
 		}),
-		Domain:       domain,
-		PublicIP:     eip,
-		GRPCPort:     gPort,
-		HTTPPort:     hPort,
-		BindIP:       ip,
-		CertFilename: certFilename,
-		KeyFilename:  keyFilename,
-		WorkingDir:   workingDir,
+		Domain:     domain,
+		Port:       port,
+		BindIP:     ip,
+		WorkingDir: workingDir,
 	}
 
 	server := sca.NewServer(cfg)
