@@ -182,6 +182,10 @@ func (s *Server) Certificate() *x509.Certificate {
 	return s.certificate
 }
 
+func (s *Server) PrivateKey() crypto.PrivateKey {
+	return s.privateKey
+}
+
 func (s *Server) Stop() error {
 	return s.listener.Close()
 }
