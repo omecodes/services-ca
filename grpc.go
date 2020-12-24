@@ -18,6 +18,9 @@ type csrServerHandler struct {
 
 func (h *csrServerHandler) SignCertificate(ctx context.Context, in *ome.SignCertificateRequest) (*ome.SignCertificateResponse, error) {
 	cred := ome.ProxyCredentialsFromContext(ctx)
+	if cred == nil {
+		return nil, errors.New(errors.CodeForbidden, "missing proxy credentials")
+	}
 
 	man := manager(ctx)
 	if man == nil {
