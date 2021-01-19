@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"github.com/omecodes/libome/errors"
+	"github.com/omecodes/errors"
 	"net"
 	"time"
 
@@ -19,12 +19,12 @@ type csrServerHandler struct {
 func (h *csrServerHandler) SignCertificate(ctx context.Context, in *ome.SignCertificateRequest) (*ome.SignCertificateResponse, error) {
 	cred := ome.ProxyCredentialsFromContext(ctx)
 	if cred == nil {
-		return nil, errors.New(errors.CodeForbidden, "missing proxy credentials")
+		return nil, errors.Create(errors.Forbidden, "missing proxy credentials")
 	}
 
 	man := manager(ctx)
 	if man == nil {
-		return nil, errors.New(errors.CodeInternal, "missing credentials manager in context")
+		return nil, errors.Create(errors.Internal, "missing credentials manager in context")
 	}
 
 	secret, err := man.GetSecret(cred.Key)
@@ -33,7 +33,7 @@ func (h *csrServerHandler) SignCertificate(ctx context.Context, in *ome.SignCert
 	}
 
 	if secret != cred.Secret {
-		return nil, errors.New(errors.CodeUnauthorized, "Authentication failed")
+		return nil, errors.Create(errors.Unauthorized, "Authentication failed")
 	}
 
 	var ips []net.IP
@@ -50,12 +50,12 @@ func (h *csrServerHandler) SignCertificate(ctx context.Context, in *ome.SignCert
 
 	signerCert := certificate(ctx)
 	if signerCert == nil {
-		return nil, errors.New(errors.CodeUnauthorized, "missing signer certificate in context")
+		return nil, errors.Create(errors.Unauthorized, "missing signer certificate in context")
 	}
 
 	signerKey := key(ctx)
 	if signerKey == nil {
-		return nil, errors.New(errors.CodeUnauthorized, "missing signer key in context")
+		return nil, errors.Create(errors.Unauthorized, "missing signer key in context")
 	}
 
 	cert, err := crypt.GenerateServiceCertificate(&crypt.CertificateTemplate{
