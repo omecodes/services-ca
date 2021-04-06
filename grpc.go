@@ -19,12 +19,12 @@ type csrServerHandler struct {
 func (h *csrServerHandler) SignCertificate(ctx context.Context, in *ome.SignCertificateRequest) (*ome.SignCertificateResponse, error) {
 	cred := ome.ProxyCredentialsFromContext(ctx)
 	if cred == nil {
-		return nil, errors.Create(errors.Forbidden, "missing proxy credentials")
+		return nil, errors.Forbidden("missing proxy credentials")
 	}
 
 	man := manager(ctx)
 	if man == nil {
-		return nil, errors.Create(errors.Internal, "missing credentials manager in context")
+		return nil, errors.New("missing credentials manager in context")
 	}
 
 	secret, err := man.GetSecret(cred.Key)
@@ -33,7 +33,7 @@ func (h *csrServerHandler) SignCertificate(ctx context.Context, in *ome.SignCert
 	}
 
 	if secret != cred.Secret {
-		return nil, errors.Create(errors.Unauthorized, "Authentication failed")
+		return nil, errors.Unauthorized("Authentication failed")
 	}
 
 	var ips []net.IP
@@ -50,12 +50,12 @@ func (h *csrServerHandler) SignCertificate(ctx context.Context, in *ome.SignCert
 
 	signerCert := certificate(ctx)
 	if signerCert == nil {
-		return nil, errors.Create(errors.Unauthorized, "missing signer certificate in context")
+		return nil, errors.Unauthorized("missing signer certificate in context")
 	}
 
 	signerKey := key(ctx)
 	if signerKey == nil {
-		return nil, errors.Create(errors.Unauthorized, "missing signer key in context")
+		return nil, errors.Unauthorized("missing signer key in context")
 	}
 
 	cert, err := crypt.GenerateServiceCertificate(&crypt.CertificateTemplate{
